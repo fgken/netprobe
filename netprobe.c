@@ -1,127 +1,194 @@
 #include <stdint.h>
 #include <string.h>
 #include <net/ethernet.h>
+#include <net/bpf.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
 
 #include <pcap.h>
 
+#include <netprobe.h>
 #include <log.h>
-
-#define PORT_DNS	53
-
-struct meta_tuple {
-	struct timespec timestamp;
-	uint32_t ifindex;
-	uint8_t direction;
-};
-
-struct l2_tuple {
-	uint8_t src_mac[ETHER_ADDR_LEN];
-	uint8_t dst_mac[ETHER_ADDR_LEN];
-	uint16_t type;
-};
-
-#define _INET6_ADDRLEN	16
-struct l3_tuple {
-	uint8_t src_ip[_INET6_ADDRLEN];
-	uint8_t dst_ip[_INET6_ADDRLEN];
-	uint8_t protocol;
-};
-
-struct l4_tuple {
-	uint16_t src_port;
-	uint16_t dst_port;
-};
-
-struct base_tuple {
-	struct meta_tuple meta;
-	struct l2_tuple l2;
-	struct l3_tuple l3;
-	struct l4_tuple l4;
-};
-
-#define UDP_PORT_DOMAIN		53
-#define TCP_PORT_DOMAIN		53
+#include <debug.h>
 
 static void
 handle_domain(const struct base_tuple *tuple, const uint8_t *buf, size_t length)
 {
 	log_debug(__func__);
+	ASSERT(tuple != NULL && buf != NULL);
+
+	MEMDUMP(buf, length);
 }
 
 static void
-handle_udp(struct base_tuple *tuple, const uint8_t *buf, size_t length)
+handle_l7(struct base_tuple *tuple, const uint8_t *buf, size_t length)
 {
 	log_debug(__func__);
+	ASSERT(tuple != NULL && buf != NULL);
 
-	if (buf != NULL && sizeof(struct udphdr) < length) {
+	switch (tuple->l4.dst_port) {
+		case UDP_PORT_DOMAIN:
+			handle_domain(tuple, buf, length);
+			break;
+		default:
+			break;
+	}
+}
+
+static size_t
+parse_l4_udp(struct base_tuple *tuple, const uint8_t *buf, size_t length)
+{
+	log_debug(__func__);
+	ASSERT(tuple != NULL && buf != NULL);
+	MEMDUMP(buf, length);
+
+	if (sizeof(struct udphdr) < length) {
 		const struct udphdr *hdr = (const struct udphdr *)buf;
 		size_t hdrlen = 8;
 
+		tuple->l4.src_port = ntohs(hdr->uh_sport);
 		tuple->l4.dst_port = ntohs(hdr->uh_dport);
 
-		switch (tuple->l4.dst_port) {
-			case UDP_PORT_DOMAIN:
-				handle_domain(tuple, buf + hdrlen, length - hdrlen);
-				break;
-			default:
-				break;
-		}
+		return hdrlen;
+	}
+
+	return 0;
+}
+
+static void
+handle_l4(struct base_tuple *tuple, const uint8_t *buf, size_t length)
+{
+	log_debug(__func__);
+	ASSERT(tuple != NULL && buf != NULL);
+
+	size_t offset_l7 = 0;
+
+	if (tuple->l3.protocol == IPPROTO_UDP) {
+		offset_l7 = parse_l4_udp(tuple, buf, length);
+		handle_l7(tuple, buf + offset_l7, length - offset_l7);
+	} else if (tuple->l3.protocol == IPPROTO_TCP) {
+		/* TODO */
 	}
 }
 
-static void
-handle_ipv4_fragment(struct base_tuple *tuple, const uint8_t *packet, size_t length, size_t offset)
+static size_t
+parse_l3_ipv4(struct base_tuple *tuple, const uint8_t *packet, size_t length)
 {
 	log_debug(__func__);
-}
+	ASSERT(tuple != NULL && packet != NULL);
 
-static void
-handle_ipv4(struct base_tuple *tuple, const uint8_t *packet, size_t length, size_t offset)
-{
-	log_debug(__func__);
-
-	if (packet != NULL && sizeof(struct ip) < length - offset) {
-		const struct ip *hdr = (const struct ip *)(packet + offset);
+	if (sizeof(struct ip) < length) {
+		const struct ip *hdr = (const struct ip *)packet;
 		size_t hdrlen = hdr->ip_hl * 4;
+
+		memcpy(tuple->l3.src_ip, &hdr->ip_src, sizeof(struct in_addr));
+		memcpy(tuple->l3.dst_ip, &hdr->ip_dst, sizeof(struct in_addr));
+		tuple->l3.protocol = hdr->ip_p;
 
 #define IS_IPFRAGMENTED(iphdr)	(((iphdr)->ip_off & (IP_RF | IP_DF)) != 0)
 		if (IS_IPFRAGMENTED(hdr)) {
-			handle_ipv4_fragment(tuple, packet, length, offset);
-		} else {
-			tuple->l3.protocol = hdr->ip_p;
-
-			switch (tuple->l3.protocol) {
-				case IPPROTO_UDP:
-					handle_udp(tuple, (uint8_t *)hdr + hdrlen, length - hdrlen);
-					break;
-				default:
-					break;
-			}
+			tuple->l3.fragmented = 1;
 		}
+
+		return hdrlen;
 	}
+
+	return 0;
+}
+
+static size_t
+parse_l3_tuple(struct base_tuple *tuple, const uint8_t *packet, size_t length)
+{
+	log_debug(__func__);
+	ASSERT(tuple != NULL && packet != NULL);
+	MEMDUMP(packet, length);
+
+	switch (tuple->l2.type) {
+		case ETHERTYPE_IP:
+			return parse_l3_ipv4(tuple, packet, length);
+		case ETHERTYPE_IPV6:
+			/* TODO */
+			return 0;
+		default:
+			break;
+	}
+
+	return 0;
+}
+
+static size_t
+parse_l2_ethernet(struct base_tuple *tuple, const uint8_t *packet, size_t length)
+{
+	log_debug(__func__);
+	ASSERT(tuple != NULL && packet != NULL);
+
+	if (sizeof(struct ether_header) < length) {
+		const struct ether_header *hdr = (const struct ether_header *)packet;
+		size_t hdrlen = ETHER_HDR_LEN;
+
+		memcpy(tuple->l2.src_mac, hdr->ether_shost, ETHER_ADDR_LEN);
+		memcpy(tuple->l2.dst_mac, hdr->ether_dhost, ETHER_ADDR_LEN);
+		tuple->l2.type = ntohs(hdr->ether_type);
+
+		return hdrlen;
+	}
+
+	return 0;
+}
+
+static size_t
+parse_l2_tuple(struct base_tuple *tuple, const uint8_t *packet, size_t length, uint32_t dlt)
+{
+	log_debug(__func__);
+	ASSERT(tuple != NULL && packet != NULL);
+	MEMDUMP(packet, length);
+
+	tuple->l2.dlt = dlt;
+
+	switch (tuple->l2.dlt) {
+		case DLT_EN10MB:
+			return parse_l2_ethernet(tuple, packet, length);
+		case DLT_PPP:
+			/* TODO */
+			return 0;
+		default:
+			break;
+	}
+
+	return 0;
 }
 
 static void
-handle_ether(struct base_tuple *tuple, const uint8_t *packet, size_t length, size_t offset)
+handle_packet(const uint8_t *packet, size_t length, int32_t dlt)
 {
 	log_debug(__func__);
 
-	if (packet != NULL && sizeof(struct ether_header) < length - offset) {
-		const struct ether_header *hdr = (const struct ether_header *)(packet + offset);
-		size_t hdrlen = ETHER_HDR_LEN;
+	if (packet != NULL) {
+		struct base_tuple tuple;
+		size_t offset_l3 = 0;
+		size_t offset_l4 = 0;
 
-		tuple->l2.type = ntohs(hdr->ether_type);
+		MEMDUMP(packet, length);
 
-		switch (tuple->l2.type) {
-			case ETHERTYPE_IP:
-				handle_ipv4(tuple, packet, length, offset + hdrlen);
-				break;
-			default:
-				break;
+		memset(&tuple, 0x00, sizeof(tuple));
+
+		offset_l3 = parse_l2_tuple(&tuple, packet, length, dlt);
+		if (offset_l3 == 0) {
+			return;
 		}
+
+		offset_l4 = parse_l3_tuple(&tuple, packet + offset_l3, length - offset_l3);
+		if (offset_l4 == 0) {
+			return;
+		}
+
+		if (tuple.l3.fragmented != 0) {
+			/* TODO */
+			return;
+		}
+
+		handle_l4(&tuple, packet + offset_l3 + offset_l4, length - offset_l4);
 	}
 }
 
@@ -169,9 +236,7 @@ int main(int argc, char *argv[])
 		/* Grab a packet */
 		packet = pcap_next(handle, &header);
 		if (packet != NULL) {
-			struct base_tuple tuple;
-			memset(&tuple, 0x00, sizeof(tuple));
-			handle_ether(&tuple, packet, header.len, 0);
+			handle_packet(packet, header.len, DLT_EN10MB);
 		}
 		/* Print its length */
 	}

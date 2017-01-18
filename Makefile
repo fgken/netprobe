@@ -1,5 +1,5 @@
 PROGRAM = netprobe
-OBJS = netprobe.o log.o
+OBJS = netprobe.o log.o debug.o
 
 CFLAGS = -I. -Wall -g -O0
 LDFLAGS =
