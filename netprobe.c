@@ -11,15 +11,7 @@
 #include <netprobe.h>
 #include <log.h>
 #include <debug.h>
-
-static void
-handle_domain(const struct base_tuple *tuple, const uint8_t *buf, size_t length)
-{
-	log_debug(__func__);
-	ASSERT(tuple != NULL && buf != NULL);
-
-	MEMDUMP(buf, length);
-}
+#include <parse_domain.h>
 
 static void
 handle_l7(struct base_tuple *tuple, const uint8_t *buf, size_t length)
@@ -27,12 +19,9 @@ handle_l7(struct base_tuple *tuple, const uint8_t *buf, size_t length)
 	log_debug(__func__);
 	ASSERT(tuple != NULL && buf != NULL);
 
-	switch (tuple->l4.dst_port) {
-		case UDP_PORT_DOMAIN:
-			handle_domain(tuple, buf, length);
-			break;
-		default:
-			break;
+#define IS_SRC_OR_DST_PORT(tuple, port)	(tuple->l4.src_port == (port) || tuple->l4.dst_port == (port))
+	if (IS_SRC_OR_DST_PORT(tuple, UDP_PORT_DOMAIN)) {
+		handle_domain(tuple, buf, length);
 	}
 }
 
