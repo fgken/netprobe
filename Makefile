@@ -1,5 +1,5 @@
 PROGRAM = netprobe
-OBJS = netprobe.o log.o debug.o parse_domain.o plugin.o plugins/tcp_retransmit.o
+OBJS = netprobe.o log.o debug.o parse_domain.o plugin.o plugins/tcp_retransmit.o murmur3.o
 
 CFLAGS = -I. -Wall -g -O0
 LDFLAGS =
