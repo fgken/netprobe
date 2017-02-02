@@ -30,6 +30,7 @@ struct l3_tuple {
 	uint8_t src_ip[_INET6_ADDRLEN];
 	uint8_t dst_ip[_INET6_ADDRLEN];
 	uint8_t protocol;
+	uint16_t payload_length;
 };
 
 struct l4_tuple {

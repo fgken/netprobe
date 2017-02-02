@@ -100,6 +100,7 @@ parse_l3_ipv4(struct base_tuple *tuple, const uint8_t *packet, size_t length)
 		memcpy(tuple->l3.src_ip, &hdr->ip_src, sizeof(struct in_addr));
 		memcpy(tuple->l3.dst_ip, &hdr->ip_dst, sizeof(struct in_addr));
 		tuple->l3.protocol = hdr->ip_p;
+		tuple->l3.payload_length = ntohs(hdr->ip_len) - hdrlen;
 
 #define IS_IPFRAGMENTED(iphdr)	(((iphdr)->ip_off & (IP_RF | IP_DF)) != 0)
 		if (IS_IPFRAGMENTED(hdr)) {
