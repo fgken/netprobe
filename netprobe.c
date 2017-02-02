@@ -5,13 +5,17 @@
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
+#include <netinet/tcp.h>
 
 #include <pcap.h>
 
 #include <netprobe.h>
+#include <plugin.h>
 #include <log.h>
 #include <debug.h>
 #include <parse_domain.h>
+
+#include <plugins/tcp_retransmit.h>
 
 static void
 handle_l7(struct base_tuple *tuple, const uint8_t *buf, size_t length)
@@ -23,6 +27,27 @@ handle_l7(struct base_tuple *tuple, const uint8_t *buf, size_t length)
 	if (IS_SRC_OR_DST_PORT(tuple, UDP_PORT_DOMAIN)) {
 		handle_domain(tuple, buf, length);
 	}
+}
+
+static size_t
+parse_l4_tcp(struct base_tuple *tuple, const uint8_t *buf, size_t length)
+{
+	log_debug(__func__);
+	ASSERT(tuple != NULL && buf != NULL);
+
+	if (sizeof(struct tcphdr) < length) {
+		const struct tcphdr *hdr = (const struct tcphdr *)buf;
+		size_t hdrlen;
+
+		hdrlen = hdr->th_off << 2;
+		tuple->l4.src_port = ntohs(hdr->th_sport);
+		tuple->l4.dst_port = ntohs(hdr->th_dport);
+
+		plugin_call(PLUGIN_TCP, tuple, buf, length);
+		return hdrlen;
+	}
+
+	return 0;
 }
 
 static size_t
@@ -39,6 +64,7 @@ parse_l4_udp(struct base_tuple *tuple, const uint8_t *buf, size_t length)
 		tuple->l4.src_port = ntohs(hdr->uh_sport);
 		tuple->l4.dst_port = ntohs(hdr->uh_dport);
 
+		plugin_call(PLUGIN_UDP, tuple, buf, length);
 		return hdrlen;
 	}
 
@@ -57,7 +83,7 @@ handle_l4(struct base_tuple *tuple, const uint8_t *buf, size_t length)
 		offset_l7 = parse_l4_udp(tuple, buf, length);
 		handle_l7(tuple, buf + offset_l7, length - offset_l7);
 	} else if (tuple->l3.protocol == IPPROTO_TCP) {
-		/* TODO */
+		parse_l4_tcp(tuple, buf, length);
 	}
 }
 
@@ -181,17 +207,25 @@ handle_packet(const uint8_t *packet, size_t length, int32_t dlt)
 	}
 }
 
+static void
+init_plugins()
+{
+	plugin_register(PLUGIN_TCP, plugin_tcp_retransmit);
+}
+
 int main(int argc, char *argv[])
 {
 	pcap_t *handle;			/* Session handle */
 	char *dev;			/* The device to sniff on */
 	char errbuf[PCAP_ERRBUF_SIZE];	/* Error string */
 	struct bpf_program fp;		/* The compiled filter */
-	char filter_exp[] = "port 53";	/* The filter expression */
+	char filter_exp[] = "port 53 or port 80 or port 443";	/* The filter expression */
 	bpf_u_int32 mask;		/* Our netmask */
 	bpf_u_int32 net;		/* Our IP */
 	struct pcap_pkthdr header;	/* The header that pcap gives us */
 	const u_char *packet;		/* The actual packet */
+
+	init_plugins();
  
 	/* Define the device */
 	dev = pcap_lookupdev(errbuf);
